@@ -24,7 +24,6 @@ use crate::{
 use crdts::Dot;
 use futures::lock::Mutex;
 use log::{debug, info, trace, warn};
-use qp2p::Config as QuicP2pConfig;
 use rand::rngs::OsRng;
 use sn_data_types::{Keypair, PublicKey, SectionElders, Token};
 use sn_messaging::{
@@ -37,6 +36,9 @@ use std::{
     {collections::HashSet, net::SocketAddr, sync::Arc},
 };
 
+// Number of attempts to make when trying to bootstrap to the network
+const NUM_OF_BOOTSTRAPPING_ATTEMPTS: u8 = 1;
+
 /// Client object
 #[derive(Clone)]
 pub struct Client {
@@ -44,6 +46,7 @@ pub struct Client {
     transfer_actor: Arc<Mutex<SafeTransferActor<Keypair>>>,
     simulated_farming_payout_dot: Dot<PublicKey>,
     session: Session,
+    signer: Signer,
 }
 
 /// Easily manage connections to/from The Safe Network with the client and its APIs.
@@ -98,8 +101,17 @@ impl Client {
         // We use feature `no-igd` so this will use the echo service only
         qp2p_config.forward_port = true;
 
-        // Create the connection manager
-        let session = attempt_bootstrap(qp2p_config, keypair.clone()).await?;
+        // We create the signer used for signing each message to provide client authority
+        let signer = Signer::new(keypair.clone());
+
+        // Create the session with the network
+        let mut session = Session::new(qp2p_config)?;
+        let client_pk = keypair.public_key();
+
+        // Bootstrap to the network, connecting to the section responsible
+        // for our client public key
+        debug!("Bootstrapping to the network...");
+        attempt_bootstrap(&mut session, client_pk).await?;
 
         // random PK used for from payment
         let random_payment_id = Keypair::new_ed25519(&mut rng);
@@ -130,6 +142,7 @@ impl Client {
             transfer_actor,
             simulated_farming_payout_dot,
             session,
+            signer,
         };
 
         if cfg!(feature = "simulated-payouts") {
@@ -226,19 +239,15 @@ impl Client {
 
 /// Utility function that bootstraps a client to the network. If there is a failure then it retries.
 /// After a maximum of three attempts if the boostrap process still fails, then an error is returned.
-async fn attempt_bootstrap(qp2p_config: QuicP2pConfig, keypair: Keypair) -> Result<Session, Error> {
-    let mut attempts: u32 = 0;
-
-    let signer = Signer::new(keypair);
-
-    let mut session = Session::new(qp2p_config, signer)?;
+async fn attempt_bootstrap(session: &mut Session, client_pk: PublicKey) -> Result<(), Error> {
+    let mut attempts: u8 = 0;
     loop {
-        let res = session.bootstrap().await;
+        let res = session.bootstrap(client_pk).await;
         match res {
-            Ok(()) => return Ok(session),
+            Ok(()) => return Ok(()),
             Err(err) => {
                 attempts += 1;
-                if attempts < 3 {
+                if attempts < NUM_OF_BOOTSTRAPPING_ATTEMPTS {
                     trace!(
                         "Error connecting to network! {:?}\nRetrying... ({})",
                         err,

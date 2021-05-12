@@ -10,6 +10,7 @@ use super::Session;
 use crate::Error;
 use log::{debug, error, info, trace, warn};
 use qp2p::IncomingMessages;
+use sn_data_types::PublicKey;
 use sn_messaging::{
     client::{Event, Message},
     section_info::{
@@ -39,13 +40,14 @@ impl Session {
     pub(crate) async fn spawn_message_listener_thread(
         &self,
         mut incoming_messages: IncomingMessages,
+        client_pk: PublicKey,
     ) {
         debug!("Listening for incoming messages");
         let mut session = self.clone();
         let _ = tokio::spawn(async move {
             loop {
                 match session
-                    .process_incoming_message(&mut incoming_messages)
+                    .process_incoming_message(&mut incoming_messages, client_pk)
                     .await
                 {
                     Ok(true) => (),
@@ -64,13 +66,14 @@ impl Session {
     pub(crate) async fn process_incoming_message(
         &mut self,
         incoming_messages: &mut IncomingMessages,
+        client_pk: PublicKey,
     ) -> Result<bool, Error> {
         if let Some((src, message)) = incoming_messages.next().await {
             let message_type = WireMsg::deserialize(message)?;
             trace!("Incoming message from {:?}", &src);
             match message_type {
                 MessageType::SectionInfo(msg) => {
-                    if let Err(error) = self.handle_section_info_msg(msg, src).await {
+                    if let Err(error) = self.handle_section_info_msg(msg, src, client_pk).await {
                         error!("Error handling network info message: {:?}", error);
                     }
                 }
@@ -92,6 +95,7 @@ impl Session {
         &mut self,
         msg: SectionInfoMsg,
         src: SocketAddr,
+        client_pk: PublicKey,
     ) -> Result<(), Error> {
         trace!("Handling network info message {:?}", msg);
 
@@ -123,7 +127,8 @@ impl Session {
                 let endpoint = self.endpoint()?.clone();
                 self.qp2p.update_bootstrap_contacts(elders);
                 let boostrapped_peer = self.qp2p.rebootstrap(&endpoint, elders).await?;
-                self.send_get_section_query(&boostrapped_peer).await?;
+                self.send_get_section_query(&boostrapped_peer, client_pk)
+                    .await?;
 
                 Ok(())
             }
