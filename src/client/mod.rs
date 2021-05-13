@@ -9,6 +9,7 @@
 mod blob_apis;
 mod blob_storage;
 mod map_apis;
+mod queries;
 mod register_apis;
 mod sequence_apis;
 mod transfer_actor;
@@ -18,7 +19,7 @@ pub use self::transfer_actor::SafeTransferActor;
 
 use crate::{
     config_handler::Config,
-    connections::{QueryResult, Session, Signer},
+    connections::{Session, Signer},
     errors::Error,
 };
 use crdts::Dot;
@@ -197,25 +198,7 @@ impl Client {
     /// # Ok(()) } ); }
     /// ```
     pub async fn public_key(&self) -> PublicKey {
-        let id = self.keypair().await;
-        id.public_key()
-    }
-
-    /// Send a Query to the network and await a response
-    async fn send_query(&self, query: Query) -> Result<QueryResult, Error> {
-        debug!("Sending QueryRequest: {:?}", query);
-        self.session.send_query(query).await
-    }
-
-    // Build and sign Cmd Message Envelope
-    pub(crate) async fn create_cmd_message(&self, msg_contents: Cmd) -> Result<Message, Error> {
-        let id = MessageId::new();
-        trace!("Creating cmd message with id: {:?}", id);
-
-        Ok(Message::Cmd {
-            cmd: msg_contents,
-            id,
-        })
+        self.keypair().await.public_key()
     }
 
     // Private helper to obtain payment proof for a data command, send it to the network,

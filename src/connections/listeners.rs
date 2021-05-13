@@ -104,20 +104,11 @@ impl Session {
                 debug!("GetSectionResponse::Success!");
                 self.update_session_info(info).await
             }
-            SectionInfoMsg::RegisterEndUserError(error)
-            | SectionInfoMsg::GetSectionResponse(GetSectionResponse::SectionInfoUpdate(error)) => {
-                warn!("Message was interrupted due to {:?}. This will most likely need to be sent again.", error);
-
-                if let SectionInfoError::InvalidBootstrap(_) = error {
-                    debug!("Attempting to connect to elders again");
-                    self.connect_to_elders().await?;
-                }
-
-                if let SectionInfoError::TargetSectionInfoOutdated(info) = error {
-                    trace!("Updated network info: ({:?})", info);
-                    self.update_session_info(info).await?;
-                }
-                Ok(())
+            SectionInfoMsg::GetSectionResponse(GetSectionResponse::SectionInfoUpdate(
+                SectionInfoError::TargetSectionInfoOutdated(info),
+            )) => {
+                trace!("Updated network info: ({:?})", info);
+                self.update_session_info(info).await
             }
             SectionInfoMsg::GetSectionResponse(GetSectionResponse::Redirect(elders)) => {
                 trace!("GetSectionResponse::Redirect, reboostrapping with provided peers");
@@ -141,12 +132,13 @@ impl Session {
                 }
                 Ok(())
             }
-            SectionInfoMsg::RegisterEndUserCmd { .. } | SectionInfoMsg::GetSectionQuery(_) => {
-                Err(Error::UnexpectedMessageOnJoin(format!(
-                    "bootstrapping failed since an invalid response ({:?}) was received",
-                    msg
-                )))
-            }
+            SectionInfoMsg::RegisterEndUserError(_)
+            | SectionInfoMsg::GetSectionResponse(GetSectionResponse::SectionInfoUpdate(_))
+            | SectionInfoMsg::RegisterEndUserCmd { .. }
+            | SectionInfoMsg::GetSectionQuery(_) => Err(Error::UnexpectedMessageOnJoin(format!(
+                "bootstrapping failed since an invalid response ({:?}) was received",
+                msg
+            ))),
         }
     }
 

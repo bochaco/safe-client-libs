@@ -6,13 +6,11 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
-use super::{QueryResult, Session, Signer};
+use super::{QueryResult, Session};
 use crate::Error;
-use bincode::serialize;
 use futures::future::{join_all, select_all};
 use itertools::Itertools;
 use log::{debug, error, info, trace, warn};
-use rand::rngs::OsRng;
 use sn_data_types::{Blob, Keypair, PrivateBlob, PublicBlob, PublicKey, TransferValidated};
 use sn_messaging::{
     client::{BlobRead, DataQuery, Message, Query, QueryResponse},
@@ -64,7 +62,6 @@ impl Session {
                 let _ = connected_elders.lock().await.remove(&disconnected_peer);
             }
         });
-        debug!("BootstrapED!!!!!",);
 
         self.send_get_section_query(&bootstrapped_peer, client_pk)
             .await?;
@@ -95,6 +92,11 @@ impl Session {
 
         self.spawn_message_listener_thread(incoming_messages, client_pk)
             .await;
+
+        debug!(
+            "Successfully obtained the list of Elders to send all messages to: {:?}",
+            self.connected_elders.lock().await.keys()
+        );
 
         Ok(())
     }
@@ -361,10 +363,11 @@ impl Session {
 
         debug!(
             "Response obtained for query w/id {:?}: {:?}",
-            &msg_id, &response
+            msg_id, response
         );
 
         // Remove the response sender
+        trace!("Removing channel for {:?}", msg_id);
         let _ = pending_queries.lock().await.remove(&msg_id);
 
         response
@@ -394,7 +397,6 @@ impl Session {
         self.endpoint()?
             .send_message(msg.clone(), bootstrapped_peer)
             .await?;
-        println!("SEND GET SECTION QUERY to {}: {:?}", bootstrapped_peer, msg);
 
         Ok(())
     }
@@ -410,123 +412,119 @@ impl Session {
     // Connect to a set of Elders nodes which will be
     // the receipients of our messages on the network.
     pub(crate) async fn connect_to_elders(&mut self) -> Result<(), Error> {
-        // We don't need to connect, as we send messages to elders
+        // TODO: We don't need to connect, as we send messages to elders
         // connections start to be cached by qp2p
 
+        self.is_connecting_to_new_elders = true;
+        // Connect to all Elders concurrently
+        // We spawn a task per each node to connect to
+        //let mut tasks = Vec::default();
+        let supermajority = self.supermajority().await;
+
+        if self.known_elders_count().await == 0 {
+            // this is not necessarily an error in case we didn't get elder info back yet
+            warn!("Not attempted to connect, insufficient elders yet known");
+        }
+
+        //let endpoint = self.endpoint()?;
+        //let msg = self.bootstrap_cmd(client_pk).await?;
+
+        let peers = self.all_known_elders.lock().await.clone();
         /*
-                self.is_connecting_to_new_elders = true;
-                // Connect to all Elders concurrently
-                // We spawn a task per each node to connect to
-                let mut tasks = Vec::default();
-                let supermajority = self.supermajority().await;
+                        let peers_len = peers.len();
 
-                if self.known_elders_count().await == 0 {
-                    // this is not necessarily an error in case we didn't get elder info back yet
-                    warn!("Not attempted to connect, insufficient elders yet known");
-                }
+                        debug!(
+                            "Sending bootstrap cmd from {} to {} peers.., supermajority would be {:?} nodes",
+                            endpoint.socket_addr(),
+                            peers_len,
+                            supermajority
+                        );
 
-                let endpoint = self.endpoint()?;
-                let msg = self.bootstrap_cmd(client_pk).await?;
+                        debug!(
+                            "Peers ({}) to be used for bootstrapping: {:?}",
+                            peers_len, peers
+                        );
 
-                let peers;
-                {
-                    peers = self.all_known_elders.lock().await.clone();
-                }
+                        for (peer_addr, name) in peers {
+                            let endpoint = endpoint.clone();
+                            let msg = msg.clone();
+                            let task_handle = tokio::spawn(async move {
+                                let mut result = Err(Error::ElderConnection);
+                                let mut connected = false;
+                                let mut attempts: usize = 0;
+                                while !connected && attempts <= NUMBER_OF_RETRIES {
+                                    attempts += 1;
+                                    if let Ok(Ok(())) =
+                                        timeout(Duration::from_secs(30), endpoint.connect_to(&peer_addr)).await
+                                    {
+                                        endpoint.send_message(msg.clone(), &peer_addr).await?;
+                                        connected = true;
 
-                let peers_len = peers.len();
+                                        debug!("Elder conn attempt #{} @ {} SUCCESS", attempts, peer_addr);
 
-                debug!(
-                    "Sending bootstrap cmd from {} to {} peers.., supermajority would be {:?} nodes",
-                    endpoint.socket_addr(),
-                    peers_len,
-                    supermajority
-                );
+                                        result = Ok((peer_addr, name))
+                                    } else {
+                                        debug!("Elder conn attempt #{} @ {} FAILED", attempts, peer_addr);
+                                    }
+                                }
 
-                debug!(
-                    "Peers ({}) to be used for bootstrapping: {:?}",
-                    peers_len, peers
-                );
+                                result
+                            });
+                            tasks.push(task_handle);
+                        }
 
-                for (peer_addr, name) in peers {
-                    let endpoint = endpoint.clone();
-                    let msg = msg.clone();
-                    let task_handle = tokio::spawn(async move {
-                        let mut result = Err(Error::ElderConnection);
-                        let mut connected = false;
-                        let mut attempts: usize = 0;
-                        while !connected && attempts <= NUMBER_OF_RETRIES {
-                            attempts += 1;
-                            if let Ok(Ok(())) =
-                                timeout(Duration::from_secs(30), endpoint.connect_to(&peer_addr)).await
-                            {
-                                endpoint.send_message(msg.clone(), &peer_addr).await?;
-                                connected = true;
+                        // TODO: Do we need a timeout here to check sufficient time has passed + or sufficient connections?
+                        let mut has_attempted_all_connections = false;
+                        let mut todo = tasks;
+                        let mut new_elders = BTreeMap::new();
 
-                                debug!("Elder conn attempt #{} @ {} SUCCESS", attempts, peer_addr);
+                        while !has_attempted_all_connections {
+                            if todo.is_empty() {
+                                warn!("No more elder connections to try");
+                                break;
+                            }
 
-                                result = Ok((peer_addr, name))
-                            } else {
-                                debug!("Elder conn attempt #{} @ {} FAILED", attempts, peer_addr);
+                            let (res, _idx, remaining_futures) = select_all(todo.into_iter()).await;
+                            if remaining_futures.is_empty() {
+                                has_attempted_all_connections = true;
+                            }
+
+                            todo = remaining_futures;
+
+                            if let Ok(elder_result) = res {
+                                let res = elder_result.map_err(|err| {
+                                    // elder connection retires already occur above
+                                    warn!("Failed to connect to Elder @ : {:?}", err);
+                                });
+
+                                if let Ok((socket, name)) = res {
+                                    info!("Connected to elder: {:?}", socket);
+                                    let _ = new_elders.insert(socket, name);
+                                }
+                            }
+
+                            if new_elders.len() >= peers_len {
+                                has_attempted_all_connections = true;
+                            }
+
+                            if new_elders.len() < peers_len {
+                                warn!("Connected to only {:?} new_elders.", new_elders.len());
+                            }
+
+                            if new_elders.len() < supermajority && has_attempted_all_connections {
+                                debug!("Attempted all connections and failed...");
+                                return Err(Error::InsufficientElderConnections(new_elders.len()));
                             }
                         }
-
-                        result
-                    });
-                    tasks.push(task_handle);
-                }
-
-                // TODO: Do we need a timeout here to check sufficient time has passed + or sufficient connections?
-                let mut has_attempted_all_connections = false;
-                let mut todo = tasks;
-                let mut new_elders = BTreeMap::new();
-
-                while !has_attempted_all_connections {
-                    if todo.is_empty() {
-                        warn!("No more elder connections to try");
-                        break;
-                    }
-
-                    let (res, _idx, remaining_futures) = select_all(todo.into_iter()).await;
-                    if remaining_futures.is_empty() {
-                        has_attempted_all_connections = true;
-                    }
-
-                    todo = remaining_futures;
-
-                    if let Ok(elder_result) = res {
-                        let res = elder_result.map_err(|err| {
-                            // elder connection retires already occur above
-                            warn!("Failed to connect to Elder @ : {:?}", err);
-                        });
-
-                        if let Ok((socket, name)) = res {
-                            info!("Connected to elder: {:?}", socket);
-                            let _ = new_elders.insert(socket, name);
-                        }
-                    }
-
-                    if new_elders.len() >= peers_len {
-                        has_attempted_all_connections = true;
-                    }
-
-                    if new_elders.len() < peers_len {
-                        warn!("Connected to only {:?} new_elders.", new_elders.len());
-                    }
-
-                    if new_elders.len() < supermajority && has_attempted_all_connections {
-                        debug!("Attempted all connections and failed...");
-                        return Err(Error::InsufficientElderConnections(new_elders.len()));
-                    }
-                }
-
-                trace!("Connected to {} Elders.", new_elders.len());
-                {
-                    let mut session_elders = self.connected_elders.lock().await;
-                    *session_elders = new_elders;
-                }
-
-                self.is_connecting_to_new_elders = false;
         */
+        trace!("Connected to {} Elders.", peers.len());
+        {
+            let mut session_elders = self.connected_elders.lock().await;
+            *session_elders = peers;
+        }
+
+        self.is_connecting_to_new_elders = false;
+
         Ok(())
     }
 }
